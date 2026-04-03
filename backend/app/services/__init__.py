@@ -36,6 +36,7 @@ from .simulation_ipc import (
     CommandType,
     CommandStatus
 )
+from .graphiti_service import GraphitiService, MiniMaxClient
 
 __all__ = [
     'OntologyGenerator', 
@@ -69,5 +70,7 @@ __all__ = [
     'IPCResponse',
     'CommandType',
     'CommandStatus',
+    'GraphitiService',
+    'MiniMaxClient',
 ]
 
