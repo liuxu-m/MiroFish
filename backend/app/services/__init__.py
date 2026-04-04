@@ -37,10 +37,13 @@ from .simulation_ipc import (
     CommandStatus
 )
 from .graphiti_service import GraphitiService, MiniMaxClient
+from .graphiti_tools import GraphitiToolsService
+from .entity_reader import EntityReader
+from .memory_updater import MemoryUpdater
 
 __all__ = [
-    'OntologyGenerator', 
-    'GraphBuilderService', 
+    'OntologyGenerator',
+    'GraphBuilderService',
     'TextProcessor',
     'ZepEntityReader',
     'EntityNode',
@@ -70,7 +73,11 @@ __all__ = [
     'IPCResponse',
     'CommandType',
     'CommandStatus',
+    # Graphiti services
     'GraphitiService',
     'MiniMaxClient',
+    'GraphitiToolsService',
+    'EntityReader',
+    'MemoryUpdater',
 ]
 
