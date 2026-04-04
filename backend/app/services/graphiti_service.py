@@ -5,7 +5,14 @@ Graphiti 知识图谱服务
 
 import os
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+# 加载 .env 文件（在服务模块加载时自动加载）
+from dotenv import load_dotenv
+env_path = Path(__file__).parent.parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(env_path, override=True)
 
 from graphiti_core import Graphiti
 from graphiti_core.llm_client import OpenAIClient, LLMConfig
@@ -151,6 +158,7 @@ class GraphitiService:
             result = await self.graphiti.add_episode(
                 name=f"Episode_{group_id}",
                 episode_body=content,
+                source_description="MiroFish simulation data",
                 group_id=group_id,
                 reference_time=datetime.now()
             )
