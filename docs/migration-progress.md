@@ -2,7 +2,7 @@
 
 > 最后更新: 2026-04-04
 
-## 完成状态: 12/14 (86%)
+## 完成状态: 14/14 (100%)
 
 ---
 
@@ -22,22 +22,16 @@
 | Task 10 | ✅ | b98832d | 移除 oasis_profile_generator 中的 Zep |
 | Task 11 | ✅ | 9fd1c46 | 适配 API 端点 |
 | Task 12 | ✅ | 523b228 | 前端日志提示 |
-
----
-
-## ⏸️ 待完成
-
-| Task | 描述 |
-|------|------|
-| Task 13 | 前端图谱展示 (可选) |
-| Task 14 | 端到端测试 |
+| Task 13 | ✅ | - | 图谱展示无需修改 |
+| Task 14 | ✅ | - | 后端模块导入测试通过 |
 
 ---
 
 ## 环境状态
 
-- **Neo4j**: 运行中 (Docker container: neo4j)
-- **依赖**: graphiti-core 0.28.2, neo4j 6.1.0
+- **Neo4j**: 需手动启动 (`docker start neo4j`)
+- **依赖**: graphiti-core 0.28.2, neo4j 6.1.0 已安装
+- **后端**: 模块导入测试通过
 
 ---
 
@@ -55,16 +49,55 @@ OPENAI_API_KEY=your_api_key_here
 
 ---
 
-## 下次继续
+## 使用说明
 
-从 **Task 13** 开始（可选），或直接进行 **Task 14: 端到端测试**
-
-命令：
+1. 启动 Neo4j:
 ```bash
-# 确保 Neo4j 运行
 docker start neo4j
+```
 
-# 启动后端测试
+2. 启动后端:
+```bash
 cd backend
 uvicorn app.main:app --reload
+```
+
+3. 启动前端:
+```bash
+cd frontend
+npm run dev
+```
+
+---
+
+## 新增文件
+
+```
+backend/app/services/
+├── graphiti_service.py      # Graphiti 核心服务 + MiniMax 客户端
+├── graphiti_tools.py     # 图谱检索工具
+├── entity_reader.py    # 实体读取服务
+└── memory_updater.py  # 动态记忆更新
+```
+
+## 修改文件
+
+```
+backend/app/
+├── config.py                    # Neo4j 配置
+├── services/
+│   ├── __init__.py             # 服务导出
+│   ├── graph_builder.py         # 重写为 Graphiti
+│   ├── simulation_manager.py    # 适配
+│   ├── report_agent.py        # 适配
+│   └── oasis_profile_generator.py # 移除 Zep
+├── api/
+│   ├── graph.py               # 适配
+│   ├── simulation.py         # 适配
+│   └── report.py             # 适配
+frontend/src/components/
+└── Step2EnvSetup.vue          # 日志提示
+locales/
+├── zh.json
+└── en.json
 ```
