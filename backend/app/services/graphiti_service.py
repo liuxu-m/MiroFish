@@ -146,10 +146,13 @@ class GraphitiService:
             添加结果
         """
         try:
+            from datetime import datetime
             # 添加到图谱
             result = await self.graphiti.add_episode(
-                episode_content=content,
-                group_id=group_id
+                name=f"Episode_{group_id}",
+                episode_body=content,
+                group_id=group_id,
+                reference_time=datetime.now()
             )
 
             return {
