@@ -36,7 +36,7 @@ from .simulation_ipc import (
     CommandType,
     CommandStatus
 )
-from .graphiti_service import GraphitiService, MiniMaxClient
+from .graphiti_service import GraphitiService, MiniMaxCompatibleClient
 from .graphiti_tools import GraphitiToolsService
 from .entity_reader import EntityReader
 from .memory_updater import MemoryUpdater
@@ -75,7 +75,7 @@ __all__ = [
     'CommandStatus',
     # Graphiti services
     'GraphitiService',
-    'MiniMaxClient',
+    'MiniMaxCompatibleClient',
     'GraphitiToolsService',
     'EntityReader',
     'MemoryUpdater',

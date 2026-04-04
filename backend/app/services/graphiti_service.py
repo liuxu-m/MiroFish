@@ -5,102 +5,277 @@ Graphiti 知识图谱服务
 
 import os
 import re
+import json
+import logging
+import typing
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
+from datetime import datetime, timezone
 
-# 加载 .env 文件（在服务模块加载时自动加载）
 from dotenv import load_dotenv
-env_path = Path(__file__).parent.parent.parent / '.env'
-if env_path.exists():
-    load_dotenv(env_path, override=True)
+from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
+from pydantic import BaseModel
 
 from graphiti_core import Graphiti
-from graphiti_core.llm_client import OpenAIClient, LLMConfig
+from graphiti_core.nodes import EpisodeType
+from graphiti_core.llm_client.client import LLMClient, get_extraction_language_instruction
+from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, LLMConfig, ModelSize
+from graphiti_core.llm_client.errors import RateLimitError
+from graphiti_core.prompts.models import Message
 from graphiti_core.embedder import OpenAIEmbedder, OpenAIEmbedderConfig
 
 from ..config import Config
 
+logger = logging.getLogger(__name__)
 
-class MiniMaxClient:
+
+output_lines = []
+
+def log(msg):
+    print(msg)
+    output_lines.append(str(msg))
+
+
+# 加载 .env 文件
+# graphiti_service.py 位于 backend/app/services/
+# 需要向上 4 级到达项目根目录
+env_path = Path(__file__).parent.parent.parent.parent / '.env'
+if env_path.exists():
+    load_dotenv(env_path, override=True)
+    print(f".env 文件已加载: {env_path}")
+else:
+    print(f".env 文件不存在: {env_path}")
+    load_dotenv(override=True)
+    print(f"使用环境变量")
+
+
+class MiniMaxCompatibleClient(LLMClient):
     """
-    MiniMax LLM 客户端封装
-    使用 OpenAIClient 配置 MiniMax API，并移除思考内容
+    兼容 MiniMax 的 LLM 客户端
+    使用 json_object 格式而非 json_schema，因为 MiniMax 不支持 json_schema
+    同时处理 MiniMax 思考模型的响应格式
     """
 
-    def __init__(self):
-        """
-        初始化 MiniMaxClient
-        从环境变量读取配置
-        """
-        # 从 .env 读取 MiniMax 配置
-        api_key = os.environ.get('MINIMAX_API_KEY', '')
-        base_url = os.environ.get('MINIMAX_BASE_URL', 'https://api.minimax.io/v1')
-        model = os.environ.get('MINIMAX_MODEL', 'MiniMax-M2.5-thinking-128k')
+    MAX_RETRIES: ClassVar[int] = 2
 
-        # 构建 LLMConfig
-        llm_config = LLMConfig(
-            api_key=api_key,
-            base_url=base_url,
-            model=model
+    def __init__(
+        self,
+        config: LLMConfig | None = None,
+        cache: bool = False,
+        max_tokens: int = 16384,
+    ):
+        if cache:
+            raise NotImplementedError('Caching is not implemented')
+
+        if config is None:
+            # 从环境变量读取 MiniMax 配置
+            api_key = os.environ.get('MINIMAX_API_KEY', '')
+            base_url = os.environ.get('MINIMAX_BASE_URL', 'https://api.minimaxi.com/v1')
+            model = os.environ.get('MINIMAX_MODEL', 'MiniMax-M2.7')
+            config = LLMConfig(
+                api_key=api_key,
+                base_url=base_url,
+                model=model
+            )
+
+        super().__init__(config, cache)
+        self.max_tokens = max_tokens
+
+        self.client = AsyncOpenAI(
+            api_key=config.api_key,
+            base_url=config.base_url
         )
-        # 使用 OpenAIClient 作为底层客户端
-        self._client = OpenAIClient(
-            config=llm_config,
-            reasoning="minimal"
-        )
 
-    async def generate_response(self, messages: List[Dict[str, Any]], **kwargs) -> str:
-        """
-        生成响应，并移除思考内容
+    async def _generate_response(
+        self,
+        messages: list[Message],
+        response_model: type[BaseModel] | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        model_size: ModelSize = ModelSize.medium,
+    ) -> dict[str, typing.Any]:
+        openai_messages: list[ChatCompletionMessageParam] = []
+        for m in messages:
+            m.content = self._clean_input(m.content)
+            if m.role == 'user':
+                openai_messages.append({'role': 'user', 'content': m.content})
+            elif m.role == 'system':
+                openai_messages.append({'role': 'system', 'content': m.content})
+        try:
+            # 关键修改: 只使用 json_object 格式，不使用 json_schema
+            # MiniMax 不支持 json_schema 格式
+            # 使用 reasoning_split=True 将思考内容分离，避免 JSON 解析失败
+            response = await self.client.chat.completions.create(
+                model=self.model or 'MiniMax-M2.7',
+                messages=openai_messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                response_format={'type': 'json_object'},
+                extra_body={"reasoning_split": True},
+            )
+            result = response.choices[0].message.content or '{}'
+            
+            # 调试: 打印原始响应
+            log(f'\n=== MiniMax 原始响应 ===')
+            log(f'响应长度: {len(result)}')
+            log(f'响应预览: {result[:2000] if result else "EMPTY"}')
+            log(f'=== 响应结束 ===\n')
+            
+            # 处理 MiniMax 思考模型的响应格式
+            # 思考内容格式: chsel...```
+            # JSON 内容格式: ```json...```
+            import re
+            
+            # 方法1: 提取 ```json ... ``` 块中的内容
+            json_match = re.search(r'```json\s*([\s\S]*?)\s*```', result)
+            if json_match:
+                result = json_match.group(1).strip()
+                log(f'提取到 JSON 块')
+            else:
+                # 方法2: 移除 chsel...``` 思考块
+                result = re.sub(r'chsel[\s\S]*?```', '', result)
+                result = result.strip()
+                # 方法3: 尝试提取 JSON 数组或对象
+                json_array_match = re.search(r'\[[\s\S]*\]', result)
+                json_object_match = re.search(r'\{[\s\S]*\}', result)
+                if json_array_match:
+                    result = json_array_match.group(0)
+                elif json_object_match:
+                    result = json_object_match.group(0)
+            
+            # 确保 result 不为空
+            if not result or result == '{}':
+                log(f'警告: JSON 内容为空')
+                return {}
+            
+            log(f'最终 JSON 长度: {len(result)}')
+            log(f'最终 JSON 预览: {result[:300]}')
+            
+            try:
+                parsed = json.loads(result)
+                
+                # 格式转换: 将 MiniMax 返回的格式转换为 graphiti-core 期望的格式
+                # 根据 response_model 的类型决定转换逻辑
+                
+                if response_model is not None:
+                    model_name = response_model.__name__
+                    log(f'期望模型: {model_name}')
+                    
+                    # ExtractedEntities 格式: {"extracted_entities": [{"name": "...", "entity_type_id": ...}]}
+                    if 'ExtractedEntities' in model_name or 'ExtractedEntity' in str(response_model.model_fields()):
+                        if isinstance(parsed, list):
+                            entities = []
+                            for item in parsed:
+                                entity = dict(item)
+                                if 'entity_name' in entity and 'name' not in entity:
+                                    entity['name'] = entity.pop('entity_name')
+                                if 'entity_text' in entity and 'name' not in entity:
+                                    entity['name'] = entity.pop('entity_text')
+                                entities.append(entity)
+                            parsed = {"extracted_entities": entities}
+                        elif isinstance(parsed, dict):
+                            if 'entities' in parsed and 'extracted_entities' not in parsed:
+                                entities = []
+                                for item in parsed.get('entities', []):
+                                    entity = dict(item)
+                                    if 'entity_name' in entity and 'name' not in entity:
+                                        entity['name'] = entity.pop('entity_name')
+                                    if 'entity_text' in entity and 'name' not in entity:
+                                        entity['name'] = entity.pop('entity_text')
+                                    entities.append(entity)
+                                parsed = {"extracted_entities": entities}
+                            elif 'extracted_entities' not in parsed:
+                                for entity in parsed.get('extracted_entities', []):
+                                    if 'entity_name' in entity and 'name' not in entity:
+                                        entity['name'] = entity.pop('entity_name')
+                                    if 'entity_text' in entity and 'name' not in entity:
+                                        entity['name'] = entity.pop('entity_text')
+                    
+                    # NodeResolutions 格式: {"entity_resolutions": [...]}
+                    elif 'NodeResolutions' in model_name or 'NodeDuplicate' in str(response_model.model_fields()):
+                        if isinstance(parsed, list):
+                            parsed = {"entity_resolutions": parsed}
+                        elif isinstance(parsed, dict) and 'entity_resolutions' not in parsed:
+                            if 'resolutions' in parsed:
+                                parsed = {"entity_resolutions": parsed['resolutions']}
+                            elif 'node_resolutions' in parsed:
+                                pass  # 已经是正确格式
+                    
+                log(f'最终解析结果类型: {type(parsed).__name__}')
+                return parsed
+            except json.JSONDecodeError as e:
+                log(f'JSON 解析错误: {e}')
+                log(f'尝试修复 JSON...')
+                # 尝试修复常见的 JSON 问题
+                result = result.replace('\n', ' ')
+                result = re.sub(r',\s*}', '}', result)
+                result = re.sub(r',\s*]', ']', result)
+                return json.loads(result)
+            except Exception as e:
+                logger.error(f'Error in generating LLM response: {e}')
+                raise
+        except Exception as e:
+            logger.error(f'Error in generating LLM response: {e}')
+            raise
 
-        Args:
-            messages: 消息列表
-            **kwargs: 其他参数
+    async def generate_response(
+        self,
+        messages: list[Message],
+        response_model: type[BaseModel] | None = None,
+        max_tokens: int | None = None,
+        model_size: ModelSize = ModelSize.medium,
+        group_id: str | None = None,
+        prompt_name: str | None = None,
+    ) -> dict[str, typing.Any]:
+        if max_tokens is None:
+            max_tokens = self.max_tokens
 
-        Returns:
-            移除思考内容后的响应
-        """
-        # 调用客户端生成响应
-        response = await self._client.generate_response(messages, **kwargs)
-
-        # 如果是字典，提取 content 字段
-        if isinstance(response, dict):
-            response = response.get('content', '')
-
-        # 移除思考内容
-        response = self._remove_thinking(response)
-
-        return response
-
-    @staticmethod
-    def _remove_thinking(text: str) -> str:
-        """
-        移除思考内容
-
-        移除模式:
-        - <think>...</think>
-        - <think>...<|im_end|>
-
-        Args:
-            text: 原始文本
-
-        Returns:
-            移除思考内容后的文本
-        """
-        if not text:
-            return text
-
-        # 移除 <think>...</think> 模式
-        text = re.sub(r'<think>[\s\S]*?</think>', '', text)
-
-        # 移除 <think>...<|im_end|> 模式
-        text = re.sub(r'<think>[\s\S]*?<\|im_end\|>', '', text)
-
-        # 清理多余空白
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        text = text.strip()
-
-        return text
+        # 添加多语言提取指令
+        messages[0].content += get_extraction_language_instruction(group_id)
+        # 使用追踪器
+        with self.tracer.start_span('llm.generate') as span:
+            attributes = {
+                'llm.provider': 'minimax',
+                'model.size': model_size.value,
+                'max_tokens': max_tokens,
+            }
+            if prompt_name:
+                attributes['prompt.name'] = prompt_name
+            span.add_attributes(attributes)
+            retry_count = 0
+            last_error = None
+            while retry_count <= self.MAX_RETRIES:
+                try:
+                    response = await self._generate_response(
+                        messages, response_model, max_tokens=max_tokens, model_size=model_size
+                    )
+                    return response
+                except RateLimitError:
+                    span.set_status('error', str(last_error))
+                    raise
+                except Exception as e:
+                    last_error = e
+                    if retry_count >= self.MAX_RETRIES:
+                        logger.error(f'Max retries ({self.MAX_RETRIES}) exceeded. Last error: {e}')
+                        span.set_status('error', str(e))
+                        span.record_exception(e)
+                        raise
+                    retry_count += 1
+                    error_context = (
+                        f'The previous response attempt was invalid. '
+                        f'Error type: {e.__class__.__name__}. '
+                        f'Error details: {str(e)}. '
+                        f'Please try again with a valid JSON response.'
+                    )
+                    error_message = Message(role='user', content=error_context)
+                    messages.append(error_message)
+                    logger.warning(
+                        f'Retrying after error (attempt {retry_count}/{self.MAX_RETRIES}): {e}'
+                    )
+            span.set_status('error', str(last_error))
+            raise last_error or Exception('Max retries exceeded with no specific error')
+    async def close(self):
+        pass
 
 
 class GraphitiService:
@@ -108,35 +283,30 @@ class GraphitiService:
     Graphiti 知识图谱服务
     提供知识图谱的构建、搜索和查询功能
     """
-
     def __init__(self):
         """
         初始化 Graphiti 服务
         """
         # 初始化 MiniMax LLM 客户端
-        self.llm_client = MiniMaxClient()
-
+        self.llm_client = MiniMaxCompatibleClient()
         # 初始化 Embedder（从环境变量读取，SiliconFlow）
         embedder_api_key = os.environ.get('OPENAI_API_KEY', '')
         embedder_base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')
         embedder_model = os.environ.get('OPENAI_EMBEDDING_MODEL', 'Qwen/Qwen3-Embedding-0.6B')
-
         embedder_config = OpenAIEmbedderConfig(
             api_key=embedder_api_key,
             base_url=embedder_base_url,
             embedding_model=embedder_model
         )
         self.embedder = OpenAIEmbedder(config=embedder_config)
-
         # 初始化 Graphiti 客户端
         self.graphiti = Graphiti(
             uri=Config.NEO4J_URI,
             user=Config.NEO4J_USER,
             password=Config.NEO4J_PASSWORD,
-            llm_client=self.llm_client._client,
+            llm_client=self.llm_client,
             embedder=self.embedder
         )
-
     async def add_episodes(
         self,
         group_id: str,
@@ -144,16 +314,13 @@ class GraphitiService:
     ) -> Dict[str, Any]:
         """
         添加文本到知识图谱
-
         Args:
             group_id: 分组ID
             content: 要添加的文本内容
-
         Returns:
             添加结果
         """
         try:
-            from datetime import datetime
             # 添加到图谱
             result = await self.graphiti.add_episode(
                 name=f"Episode_{group_id}",
@@ -162,7 +329,6 @@ class GraphitiService:
                 group_id=group_id,
                 reference_time=datetime.now()
             )
-
             return {
                 "success": True,
                 "group_id": group_id,
@@ -175,7 +341,6 @@ class GraphitiService:
                 "group_id": group_id,
                 "error": str(e)
             }
-
     async def search(
         self,
         group_id: str,
@@ -184,12 +349,10 @@ class GraphitiService:
     ) -> List[Dict[str, Any]]:
         """
         混合搜索
-
         Args:
             group_id: 分组ID
             query: 查询文本
             limit: 返回结果数量限制
-
         Returns:
             搜索结果列表
         """
@@ -200,7 +363,6 @@ class GraphitiService:
                 group_ids=[group_id],
                 num_results=limit
             )
-
             # 转换为可序列化的格式
             return [
                 {
@@ -213,17 +375,14 @@ class GraphitiService:
             ]
         except Exception as e:
             return []
-
     async def get_nodes(
         self,
         group_id: str
     ) -> List[Dict[str, Any]]:
         """
         获取指定分组的全部节点
-
         Args:
             group_id: 分组ID
-
         Returns:
             节点列表
         """
@@ -234,11 +393,9 @@ class GraphitiService:
                 group_ids=[group_id],
                 num_results=100
             )
-
             # 提取节点信息
             nodes = []
             seen_uuids = set()
-
             for edge in results:
                 # 收集源节点
                 if edge.source_node_uuid and edge.source_node_uuid not in seen_uuids:
@@ -248,7 +405,6 @@ class GraphitiService:
                         "name": getattr(edge, 'source_name', None),
                         "properties": getattr(edge, 'source_properties', {})
                     })
-
                 # 收集目标节点
                 if edge.target_node_uuid and edge.target_node_uuid not in seen_uuids:
                     seen_uuids.add(edge.target_node_uuid)
@@ -257,21 +413,17 @@ class GraphitiService:
                         "name": getattr(edge, 'target_name', None),
                         "properties": getattr(edge, 'target_properties', {})
                     })
-
             return nodes
         except Exception as e:
             return []
-
     async def get_edges(
         self,
         group_id: str
     ) -> List[Dict[str, Any]]:
         """
         获取指定分组的全部边
-
         Args:
             group_id: 分组ID
-
         Returns:
             边列表
         """
@@ -282,7 +434,6 @@ class GraphitiService:
                 group_ids=[group_id],
                 num_results=100
             )
-
             # 提取边信息
             edges = []
             for edge in results:
@@ -292,7 +443,6 @@ class GraphitiService:
                     "target": edge.target_node_uuid,
                     "properties": edge.properties
                 })
-
             return edges
         except Exception as e:
             return []
