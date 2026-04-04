@@ -109,11 +109,10 @@ class GraphitiService:
         # 初始化 MiniMax LLM 客户端
         self.llm_client = MiniMaxClient()
 
-        # 初始化 Embedder（从环境变量读取独立配置）
-        # 注意：Embedding 模型可以使用与 LLM 不同的服务
-        embedder_api_key = os.environ.get('OPENAI_API_KEY', '')
-        embedder_base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
-        embedder_model = os.environ.get('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+        # 初始化 Embedder（SiliconFlow）
+        embedder_api_key = os.environ.get('OPENAI_API_KEY', 'sk-hyidmjeezkubefcmhueqvylalmdbsdwmaqniwvwdfqrxdhmo')
+        embedder_base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')
+        embedder_model = os.environ.get('OPENAI_EMBEDDING_MODEL', 'Qwen/Qwen3-Embedding-0.6B')
 
         embedder_config = OpenAIEmbedderConfig(
             api_key=embedder_api_key,
