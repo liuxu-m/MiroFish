@@ -39,7 +39,17 @@ class Config:
     NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
     NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
     NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'password')
-    
+
+    # Graphiti LLM (MiniMax) 配置
+    MINIMAX_API_KEY = os.environ.get('MINIMAX_API_KEY')
+    MINIMAX_BASE_URL = os.environ.get('MINIMAX_BASE_URL', 'https://api.minimax.io/v1')
+    MINIMAX_MODEL = os.environ.get('MINIMAX_MODEL', 'MiniMax-M2.5-thinking-128k')
+
+    # Graphiti Embedding (SiliconFlow) 配置
+    OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+    OPENAI_BASE_URL = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')
+    OPENAI_EMBEDDING_MODEL = os.environ.get('OPENAI_EMBEDDING_MODEL', 'Qwen/Qwen3-Embedding-0.6B')
+
     # 文件上传配置
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
@@ -74,7 +84,10 @@ class Config:
         errors = []
         if not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY 未配置")
-        if not cls.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY 未配置")
+        # Graphiti 配置验证（Neo4j 或 MiniMax）
+        if not cls.NEO4J_URI:
+            errors.append("NEO4J_URI 未配置")
+        if not cls.MINIMAX_API_KEY:
+            errors.append("MINIMAX_API_KEY (Graphiti LLM) 未配置")
         return errors
 
