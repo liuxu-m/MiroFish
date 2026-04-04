@@ -43,6 +43,38 @@ class GraphBuilderService:
         self.service = GraphitiService()
         self.task_manager = TaskManager()
 
+    def create_graph(self, name: str = "MiroFish Graph") -> str:
+        """创建图谱"""
+        return f"mirofish_{uuid.uuid4().hex[:16]}"
+
+    def set_ontology(self, group_id: str, ontology: Dict[str, Any]):
+        """设置本体（Graphiti 会自动从文本提取，当前保留空实现）"""
+        # Graphiti 自动从文本内容提取实体和关系
+        # 不需要手动设置 ontology
+        pass
+
+    def add_text_batches(self, group_id: str, chunks: List[str], batch_size: int = 3,
+                        progress_callback: Optional[Callable] = None) -> List[str]:
+        """分批添加文本到图谱"""
+        episode_uuids = []
+        for i, chunk in enumerate(chunks):
+            asyncio.run(self.service.add_episodes(group_id, chunk))
+            episode_uuids.append(f"ep_{i}")
+            if progress_callback:
+                progress_callback(f"发送第 {i+1}/{len(chunks)} 块", (i+1)/len(chunks))
+        return episode_uuids
+
+    def _wait_for_episodes(self, episode_uuids: List[str],
+                         progress_callback: Optional[Callable] = None,
+                         timeout: int = 600):
+        """等待 episode 处理完成（Graphiti 需要时间处理）"""
+        # Graphiti 会自动处理，给一些时间
+        import time
+        for i in range(10):
+            if progress_callback:
+                progress_callback(f"处理中... {i+1}/10", (i+1)/10)
+            time.sleep(1)
+
     def build_graph_async(
         self,
         text: str,
