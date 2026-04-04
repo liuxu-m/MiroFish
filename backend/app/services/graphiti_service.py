@@ -102,16 +102,12 @@ class MiniMaxCompatibleClient(LLMClient):
             elif m.role == 'system':
                 openai_messages.append({'role': 'system', 'content': m.content})
         try:
-            # 关键修改: 只使用 json_object 格式，不使用 json_schema
-            # MiniMax 不支持 json_schema 格式
-            # 使用 reasoning_split=True 将思考内容分离，避免 JSON 解析失败
             response = await self.client.chat.completions.create(
                 model=self.model or 'MiniMax-M2.7',
                 messages=openai_messages,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 response_format={'type': 'json_object'},
-                extra_body={"reasoning_split": True},
             )
             result = response.choices[0].message.content or '{}'
             
@@ -121,9 +117,10 @@ class MiniMaxCompatibleClient(LLMClient):
             log(f'响应预览: {result[:2000] if result else "EMPTY"}')
             log(f'=== 响应结束 ===\n')
             
-            # 处理 MiniMax 思考模型的响应格式
-            # 思考内容格式: chsel...```
-            # JSON 内容格式: ```json...``` 或 ```...```
+            # 处理 MiniMax 响应格式
+            # 1. 思考内容格式: chsel...```
+            # 2. JSON 代码块: ```json...``` 或 ```...```
+            # 3. Markdown 格式: ## Entity Extraction Results (需要特殊处理)
             
             # 方法1: 提取 ```json ... ``` 或 ``` ... ``` 块中的内容
             json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result)
@@ -135,15 +132,36 @@ class MiniMaxCompatibleClient(LLMClient):
             result = re.sub(r'chsel[\s\S]*?```', '', result)
             result = result.strip()
             
-            # 方法3: 尝试提取 JSON 对象（贪婪匹配最外层大括号）
+            # 方法3: 如果是 Markdown 格式，尝试提取实体信息
+            if result.startswith('#') or result.startswith('##'):
+                log(f'检测到 Markdown 格式响应，尝试提取实体...')
+                entities = []
+                entity_pattern = r'\d+\.\s*\*\*([^*]+)\*\*\s*-\s*Entity:'
+                for match in re.finditer(entity_pattern, result):
+                    entity_name = match.group(1).strip()
+                    entities.append({
+                        "entity_name": entity_name,
+                        "entity_type_id": 0
+                    })
+                if entities:
+                    result = json.dumps(entities)
+                    log(f'从 Markdown 提取到 {len(entities)} 个实体')
+            
+            # 方法4: 尝试提取 JSON 对象（贪婪匹配最外层大括号）
             if not result.startswith('{') and not result.startswith('['):
                 json_object_match = re.search(r'\{[\s\S]*\}', result)
                 if json_object_match:
                     result = json_object_match.group(0)
             
+            # 方法5: 尝试提取 JSON 数组
+            if not result.startswith('{') and not result.startswith('['):
+                json_array_match = re.search(r'\[[\s\S]*\]', result)
+                if json_array_match:
+                    result = json_array_match.group(0)
+            
             # 确保 result 不为空
             if not result or result == '{}':
-                log(f'警告: JSON 内容为空')
+                log(f'警告: JSON 内容为空，返回空对象')
                 return {}
             
             log(f'最终 JSON 长度: {len(result)}')
@@ -229,12 +247,18 @@ class MiniMaxCompatibleClient(LLMClient):
             except json.JSONDecodeError as e:
                 log(f'JSON 解析错误: {e}')
                 log(f'尝试修复 JSON...')
-                # 尝试修复常见的 JSON 问题
-                result = result.replace('\n', ' ')
-                result = re.sub(r',\s*}', '}', result)
-                result = re.sub(r',\s*]', ']', result)
-                return json.loads(result)
+                try:
+                    # 尝试修复常见的 JSON 问题
+                    result = result.replace('\n', ' ')
+                    result = re.sub(r',\s*}', '}', result)
+                    result = re.sub(r',\s*]', ']', result)
+                    parsed = json.loads(result)
+                    return parsed
+                except:
+                    log(f'JSON 修复失败，返回空对象')
+                    return {}
             except Exception as e:
+                log(f'处理响应时发生错误: {type(e).__name__}: {e}')
                 logger.error(f'Error in generating LLM response: {e}')
                 raise
         except Exception as e:
