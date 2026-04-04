@@ -123,24 +123,22 @@ class MiniMaxCompatibleClient(LLMClient):
             
             # 处理 MiniMax 思考模型的响应格式
             # 思考内容格式: chsel...```
-            # JSON 内容格式: ```json...```
-            import re
+            # JSON 内容格式: ```json...``` 或 ```...```
             
-            # 方法1: 提取 ```json ... ``` 块中的内容
-            json_match = re.search(r'```json\s*([\s\S]*?)\s*```', result)
+            # 方法1: 提取 ```json ... ``` 或 ``` ... ``` 块中的内容
+            json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result)
             if json_match:
                 result = json_match.group(1).strip()
-                log(f'提取到 JSON 块')
-            else:
-                # 方法2: 移除 chsel...``` 思考块
-                result = re.sub(r'chsel[\s\S]*?```', '', result)
-                result = result.strip()
-                # 方法3: 尝试提取 JSON 数组或对象
-                json_array_match = re.search(r'\[[\s\S]*\]', result)
+                log(f'提取到代码块中的内容')
+            
+            # 方法2: 移除 chsel...``` 思考块
+            result = re.sub(r'chsel[\s\S]*?```', '', result)
+            result = result.strip()
+            
+            # 方法3: 尝试提取 JSON 对象（贪婪匹配最外层大括号）
+            if not result.startswith('{') and not result.startswith('['):
                 json_object_match = re.search(r'\{[\s\S]*\}', result)
-                if json_array_match:
-                    result = json_array_match.group(0)
-                elif json_object_match:
+                if json_object_match:
                     result = json_object_match.group(0)
             
             # 确保 result 不为空
@@ -160,46 +158,71 @@ class MiniMaxCompatibleClient(LLMClient):
                 if response_model is not None:
                     model_name = response_model.__name__
                     log(f'期望模型: {model_name}')
+                    log(f'解析前的数据: {json.dumps(parsed, ensure_ascii=False)[:500]}')
                     
                     # ExtractedEntities 格式: {"extracted_entities": [{"name": "...", "entity_type_id": ...}]}
-                    if 'ExtractedEntities' in model_name or 'ExtractedEntity' in str(response_model.model_fields()):
+                    if 'ExtractedEntities' in model_name or 'ExtractedEntity' in str(response_model.model_fields):
+                        def convert_entity(entity):
+                            entity = dict(entity)
+                            log(f'  转换前实体: {entity}')
+                            # MiniMax 返回 entity_name 作为实体名称，entity_id 是序号
+                            if 'entity_name' in entity and 'name' not in entity:
+                                entity['name'] = entity.pop('entity_name')
+                            elif 'entity_text' in entity and 'name' not in entity:
+                                entity['name'] = entity.pop('entity_text')
+                            # 移除 entity_id（序号），不要用作 name
+                            if 'entity_id' in entity:
+                                entity.pop('entity_id')
+                            if 'entity_type_name' in entity and 'entity_type_id' not in entity:
+                                entity_type_name = entity.pop('entity_type_name')
+                                entity['entity_type_id'] = 0
+                            # 移除其他不需要的字段
+                            if 'extracted_from' in entity:
+                                entity.pop('extracted_from')
+                            log(f'  转换后实体: {entity}')
+                            return entity
+                        
                         if isinstance(parsed, list):
-                            entities = []
-                            for item in parsed:
-                                entity = dict(item)
-                                if 'entity_name' in entity and 'name' not in entity:
-                                    entity['name'] = entity.pop('entity_name')
-                                if 'entity_text' in entity and 'name' not in entity:
-                                    entity['name'] = entity.pop('entity_text')
-                                entities.append(entity)
+                            entities = [convert_entity(item) for item in parsed]
                             parsed = {"extracted_entities": entities}
                         elif isinstance(parsed, dict):
                             if 'entities' in parsed and 'extracted_entities' not in parsed:
-                                entities = []
-                                for item in parsed.get('entities', []):
-                                    entity = dict(item)
-                                    if 'entity_name' in entity and 'name' not in entity:
-                                        entity['name'] = entity.pop('entity_name')
-                                    if 'entity_text' in entity and 'name' not in entity:
-                                        entity['name'] = entity.pop('entity_text')
-                                    entities.append(entity)
+                                entities = [convert_entity(item) for item in parsed.get('entities', [])]
                                 parsed = {"extracted_entities": entities}
-                            elif 'extracted_entities' not in parsed:
-                                for entity in parsed.get('extracted_entities', []):
-                                    if 'entity_name' in entity and 'name' not in entity:
-                                        entity['name'] = entity.pop('entity_name')
-                                    if 'entity_text' in entity and 'name' not in entity:
-                                        entity['name'] = entity.pop('entity_text')
+                            elif 'extracted_entities' in parsed:
+                                entities = [convert_entity(item) for item in parsed.get('extracted_entities', [])]
+                                parsed = {"extracted_entities": entities}
+                            else:
+                                entities = [convert_entity(item) for item in parsed.get('extracted_entities', [])]
+                                parsed = {"extracted_entities": entities}
                     
                     # NodeResolutions 格式: {"entity_resolutions": [...]}
-                    elif 'NodeResolutions' in model_name or 'NodeDuplicate' in str(response_model.model_fields()):
+                    elif 'NodeResolutions' in model_name or 'NodeDuplicate' in str(response_model.model_fields):
+                        log(f'NodeResolutions 原始数据: {parsed}')
                         if isinstance(parsed, list):
                             parsed = {"entity_resolutions": parsed}
+                            log(f'转换为: {parsed}')
                         elif isinstance(parsed, dict) and 'entity_resolutions' not in parsed:
                             if 'resolutions' in parsed:
                                 parsed = {"entity_resolutions": parsed['resolutions']}
                             elif 'node_resolutions' in parsed:
                                 pass  # 已经是正确格式
+                            else:
+                                log(f'未知的 dict 结构: {parsed}')
+                    
+                    # ExtractedEdges 格式: {"edges": [...]}
+                    elif 'ExtractedEdges' in model_name or 'Edge' in str(response_model.model_fields):
+                        log(f'ExtractedEdges 原始数据: {parsed}')
+                        if isinstance(parsed, list):
+                            parsed = {"edges": parsed}
+                            log(f'转换为: {parsed}')
+                        elif isinstance(parsed, dict) and 'edges' not in parsed:
+                            if 'extracted_edges' in parsed:
+                                parsed = {"edges": parsed['extracted_edges']}
+                            elif 'relations' in parsed:
+                                parsed = {"edges": parsed['relations']}
+                            else:
+                                log(f'未知的 dict 结构: {parsed}')
                     
                 log(f'最终解析结果类型: {type(parsed).__name__}')
                 return parsed
@@ -336,6 +359,9 @@ class GraphitiService:
                 "result": result
             }
         except Exception as e:
+            import traceback
+            logger.error(f"add_episodes 错误: {e}")
+            logger.error(traceback.format_exc())
             return {
                 "success": False,
                 "group_id": group_id,
