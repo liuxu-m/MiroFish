@@ -118,9 +118,13 @@ class MiniMaxCompatibleClient(LLMClient):
             log(f'=== 响应结束 ===\n')
             
             # 处理 MiniMax 响应格式
-            # 1. 思考内容格式: chsel...```
+            # 1. 思考内容格式: <think...</think 或 chsel...```
             # 2. JSON 代码块: ```json...``` 或 ```...```
             # 3. Markdown 格式: ## Entity Extraction Results (需要特殊处理)
+            
+            # 方法0: 移除 <think...</think 思考块 (MiniMax 新格式)
+            result = re.sub(r'<think[\s\S]*?</think\s*>', '', result)
+            result = result.strip()
             
             # 方法1: 提取 ```json ... ``` 或 ``` ... ``` 块中的内容
             json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result)

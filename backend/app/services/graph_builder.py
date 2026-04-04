@@ -57,11 +57,23 @@ class GraphBuilderService:
                         progress_callback: Optional[Callable] = None) -> List[str]:
         """分批添加文本到图谱"""
         episode_uuids = []
-        for i, chunk in enumerate(chunks):
-            asyncio.run(self.service.add_episodes(group_id, chunk))
-            episode_uuids.append(f"ep_{i}")
-            if progress_callback:
-                progress_callback(f"发送第 {i+1}/{len(chunks)} 块", (i+1)/len(chunks))
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def add_all():
+                for i, chunk in enumerate(chunks):
+                    await self.service.add_episodes(group_id, chunk)
+                    if progress_callback:
+                        progress_callback(f"发送第 {i+1}/{len(chunks)} 块", (i+1)/len(chunks))
+            
+            loop.run_until_complete(add_all())
+            episode_uuids = [f"ep_{i}" for i in range(len(chunks))]
+        finally:
+            try:
+                loop.close()
+            except:
+                pass
         return episode_uuids
 
     def _wait_for_episodes(self, episode_uuids: List[str],
@@ -126,20 +138,28 @@ class GraphBuilderService:
         """图谱构建工作线程"""
         set_locale(locale)
         
-        async def build_all():
-            chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
-            total_chunks = len(chunks)
-            
-            for i, chunk in enumerate(chunks):
-                await self.service.add_episodes(group_id, chunk)
-                time.sleep(0.5)
-        
         try:
-            asyncio.run(build_all())
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def build_all():
+                chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
+                total_chunks = len(chunks)
+                
+                for i, chunk in enumerate(chunks):
+                    await self.service.add_episodes(group_id, chunk)
+                    await asyncio.sleep(0.5)
+            
+            loop.run_until_complete(build_all())
         except Exception as e:
             import traceback
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
             pass
+        finally:
+            try:
+                loop.close()
+            except:
+                pass
 
     def get_graph_data(self, group_id: str) -> Dict[str, Any]:
         """
@@ -151,36 +171,47 @@ class GraphBuilderService:
         Returns:
             包含nodes和edges的字典，包括时间信息、属性等详细数据
         """
-        nodes = asyncio.run(self.service.get_nodes(group_id))
-        edges = asyncio.run(self.service.get_edges(group_id))
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            async def fetch_all():
+                nodes = await self.service.get_nodes(group_id)
+                edges = await self.service.get_edges(group_id)
+                return nodes, edges
+            
+            nodes, edges = loop.run_until_complete(fetch_all())
+            
+            nodes_data = []
+            for node in nodes:
+                nodes_data.append({
+                    "uuid": node.get("uuid", ""),
+                    "name": node.get("name", ""),
+                    "labels": node.get("labels", []),
+                    "properties": node.get("properties", {}),
+                })
 
-        # 构建节点数据
-        nodes_data = []
-        for node in nodes:
-            nodes_data.append({
-                "uuid": node.get("uuid", ""),
-                "name": node.get("name", ""),
-                "labels": node.get("labels", []),
-                "properties": node.get("properties", {}),
-            })
+            edges_data = []
+            for edge in edges:
+                edges_data.append({
+                    "name": edge.get("name", ""),
+                    "source": edge.get("source", ""),
+                    "target": edge.get("target", ""),
+                    "properties": edge.get("properties", {}),
+                })
 
-        # 构建边数据
-        edges_data = []
-        for edge in edges:
-            edges_data.append({
-                "name": edge.get("name", ""),
-                "source": edge.get("source", ""),
-                "target": edge.get("target", ""),
-                "properties": edge.get("properties", {}),
-            })
-
-        return {
-            "group_id": group_id,
-            "nodes": nodes_data,
-            "edges": edges_data,
-            "node_count": len(nodes_data),
-            "edge_count": len(edges_data),
-        }
+            return {
+                "group_id": group_id,
+                "nodes": nodes_data,
+                "edges": edges_data,
+                "node_count": len(nodes_data),
+                "edge_count": len(edges_data),
+            }
+        finally:
+            try:
+                loop.close()
+            except:
+                pass
 
     def delete_graph(self, group_id: str):
         """
