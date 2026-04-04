@@ -23,12 +23,18 @@ class MiniMaxClient:
     def __init__(self):
         """
         初始化 MiniMaxClient
+        从环境变量读取配置
         """
+        # 从 .env 读取 MiniMax 配置
+        api_key = os.environ.get('MINIMAX_API_KEY', '')
+        base_url = os.environ.get('MINIMAX_BASE_URL', 'https://api.minimax.io/v1')
+        model = os.environ.get('MINIMAX_MODEL', 'MiniMax-M2.5-thinking-128k')
+
         # 构建 LLMConfig
         llm_config = LLMConfig(
-            api_key=os.environ.get('MINIMAX_API_KEY', ''),
-            base_url="https://api.minimax.io/v1",
-            model="MiniMax-M2.5-thinking-128k"
+            api_key=api_key,
+            base_url=base_url,
+            model=model
         )
         # 使用 OpenAIClient 作为底层客户端
         self._client = OpenAIClient(
@@ -103,12 +109,16 @@ class GraphitiService:
         # 初始化 MiniMax LLM 客户端
         self.llm_client = MiniMaxClient()
 
-        # 初始化 Embedder（使用 OpenAI Embedder，后续可替换）
-        # 注意：当前仅支持 OpenAI embedding 模型，若使用 MiniMax 需替换为自定义 embedder
+        # 初始化 Embedder（从环境变量读取独立配置）
+        # 注意：Embedding 模型可以使用与 LLM 不同的服务
+        embedder_api_key = os.environ.get('OPENAI_API_KEY', '')
+        embedder_base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
+        embedder_model = os.environ.get('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+
         embedder_config = OpenAIEmbedderConfig(
-            api_key=os.environ.get('MINIMAX_API_KEY', ''),
-            base_url="https://api.minimax.io/v1",
-            embedding_model="text-embedding-3-small"
+            api_key=embedder_api_key,
+            base_url=embedder_base_url,
+            embedding_model=embedder_model
         )
         self.embedder = OpenAIEmbedder(config=embedder_config)
 
