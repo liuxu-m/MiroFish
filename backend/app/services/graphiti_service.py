@@ -329,14 +329,14 @@ class GraphitiService:
     """
     Graphiti 知识图谱服务
     提供知识图谱的构建、搜索和查询功能
+    
+    注意: 由于 Windows 上 Neo4j 异步驱动与 asyncio 事件循环的兼容性问题，
+    每次操作都会创建新的 Graphiti 实例，避免跨事件循环使用连接。
     """
-    def __init__(self):
-        """
-        初始化 Graphiti 服务
-        """
-        # 初始化 MiniMax LLM 客户端
-        self.llm_client = MiniMaxCompatibleClient()
-        # 初始化 Embedder（从环境变量读取，SiliconFlow）
+    
+    def _create_graphiti(self):
+        """创建新的 Graphiti 实例"""
+        llm_client = MiniMaxCompatibleClient()
         embedder_api_key = os.environ.get('OPENAI_API_KEY', '')
         embedder_base_url = os.environ.get('OPENAI_BASE_URL', 'https://api.siliconflow.cn/v1')
         embedder_model = os.environ.get('OPENAI_EMBEDDING_MODEL', 'Qwen/Qwen3-Embedding-0.6B')
@@ -345,15 +345,15 @@ class GraphitiService:
             base_url=embedder_base_url,
             embedding_model=embedder_model
         )
-        self.embedder = OpenAIEmbedder(config=embedder_config)
-        # 初始化 Graphiti 客户端
-        self.graphiti = Graphiti(
+        embedder = OpenAIEmbedder(config=embedder_config)
+        return Graphiti(
             uri=Config.NEO4J_URI,
             user=Config.NEO4J_USER,
             password=Config.NEO4J_PASSWORD,
-            llm_client=self.llm_client,
-            embedder=self.embedder
+            llm_client=llm_client,
+            embedder=embedder
         )
+    
     async def add_episodes(
         self,
         group_id: str,
@@ -367,9 +367,9 @@ class GraphitiService:
         Returns:
             添加结果
         """
+        graphiti = self._create_graphiti()
         try:
-            # 添加到图谱
-            result = await self.graphiti.add_episode(
+            result = await graphiti.add_episode(
                 name=f"Episode_{group_id}",
                 episode_body=content,
                 source_description="MiroFish simulation data",
@@ -391,6 +391,8 @@ class GraphitiService:
                 "group_id": group_id,
                 "error": str(e)
             }
+        finally:
+            await graphiti.close()
     async def search(
         self,
         group_id: str,
@@ -406,14 +408,13 @@ class GraphitiService:
         Returns:
             搜索结果列表
         """
+        graphiti = self._create_graphiti()
         try:
-            # 执行混合搜索
-            results = await self.graphiti.search(
+            results = await graphiti.search(
                 query=query,
                 group_ids=[group_id],
                 num_results=limit
             )
-            # 转换为可序列化的格式
             return [
                 {
                     "name": edge.name,
@@ -425,6 +426,8 @@ class GraphitiService:
             ]
         except Exception as e:
             return []
+        finally:
+            await graphiti.close()
     async def get_nodes(
         self,
         group_id: str
@@ -436,18 +439,16 @@ class GraphitiService:
         Returns:
             节点列表
         """
+        graphiti = self._create_graphiti()
         try:
-            # 使用 search 获取节点
-            results = await self.graphiti.search(
+            results = await graphiti.search(
                 query="",
                 group_ids=[group_id],
                 num_results=100
             )
-            # 提取节点信息
             nodes = []
             seen_uuids = set()
             for edge in results:
-                # 收集源节点
                 if edge.source_node_uuid and edge.source_node_uuid not in seen_uuids:
                     seen_uuids.add(edge.source_node_uuid)
                     nodes.append({
@@ -455,7 +456,6 @@ class GraphitiService:
                         "name": getattr(edge, 'source_name', None),
                         "properties": getattr(edge, 'source_properties', {})
                     })
-                # 收集目标节点
                 if edge.target_node_uuid and edge.target_node_uuid not in seen_uuids:
                     seen_uuids.add(edge.target_node_uuid)
                     nodes.append({
@@ -466,6 +466,8 @@ class GraphitiService:
             return nodes
         except Exception as e:
             return []
+        finally:
+            await graphiti.close()
     async def get_edges(
         self,
         group_id: str
@@ -477,14 +479,13 @@ class GraphitiService:
         Returns:
             边列表
         """
+        graphiti = self._create_graphiti()
         try:
-            # 使用 search 获取边
-            results = await self.graphiti.search(
+            results = await graphiti.search(
                 query="",
                 group_ids=[group_id],
                 num_results=100
             )
-            # 提取边信息
             edges = []
             for edge in results:
                 edges.append({
@@ -496,3 +497,5 @@ class GraphitiService:
             return edges
         except Exception as e:
             return []
+        finally:
+            await graphiti.close()

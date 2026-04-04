@@ -125,22 +125,20 @@ class GraphBuilderService:
     ):
         """图谱构建工作线程"""
         set_locale(locale)
-        try:
-            # 1. 文本分块
+        
+        async def build_all():
             chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
             total_chunks = len(chunks)
-
-            # 2. 分批发送数据
-            for i in range(0, len(chunks), batch_size):
-                batch = chunks[i:i + batch_size]
-                for chunk in batch:
-                    asyncio.run(self.service.add_episodes(group_id, chunk))
-                time.sleep(1)
-
+            
+            for i, chunk in enumerate(chunks):
+                await self.service.add_episodes(group_id, chunk)
+                time.sleep(0.5)
+        
+        try:
+            asyncio.run(build_all())
         except Exception as e:
             import traceback
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
-            # 可以在这里添加错误日志记录
             pass
 
     def get_graph_data(self, group_id: str) -> Dict[str, Any]:
