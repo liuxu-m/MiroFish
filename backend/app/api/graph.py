@@ -574,9 +574,15 @@ def get_graph_data(graph_id: str):
                 "error": t('api.configError', details="Neo4j URI 未配置")
             }), 500
 
+        print(f"[API] get_graph_data called with graph_id={graph_id}")
+        logger.info(f"[API] get_graph_data called with graph_id={graph_id}")
+
         builder = GraphBuilderService()
         graph_data = builder.get_graph_data(graph_id)
-        
+
+        print(f"[API] returning node_count={graph_data.get('node_count')}, edge_count={graph_data.get('edge_count')}")
+        logger.info(f"[API] returning node_count={graph_data.get('node_count')}, edge_count={graph_data.get('edge_count')}")
+
         return jsonify({
             "success": True,
             "data": graph_data

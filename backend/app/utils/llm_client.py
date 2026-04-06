@@ -60,7 +60,11 @@ class LLMClient:
         
         if response_format:
             kwargs["response_format"] = response_format
-        
+
+        # MiniMax 需要 extra_body.reasoning_split 分离思考内容
+        # 同时使用 response_format 强制 JSON 输出
+        kwargs["extra_body"] = {"reasoning_split": True}
+
         response = self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除

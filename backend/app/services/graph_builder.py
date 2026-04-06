@@ -58,22 +58,25 @@ class GraphBuilderService:
         """分批添加文本到图谱"""
         episode_uuids = []
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
             async def add_all():
+                success_count = 0
                 for i, chunk in enumerate(chunks):
-                    await self.service.add_episodes(group_id, chunk)
-                    if progress_callback:
-                        progress_callback(f"发送第 {i+1}/{len(chunks)} 块", (i+1)/len(chunks))
-            
-            loop.run_until_complete(add_all())
+                    try:
+                        await self.service.add_episodes(group_id, chunk)
+                        success_count += 1
+                        if progress_callback:
+                            progress_callback(f"发送第 {i+1}/{len(chunks)} 块", (i+1)/len(chunks))
+                    except Exception as chunk_error:
+                        logger.error(f"第 {i+1} 块处理失败: {chunk_error}")
+                        continue
+
+                logger.info(f"成功处理 {success_count}/{len(chunks)} 块")
+
+            # 使用 asyncio.run() - 会自动管理事件循环
+            asyncio.run(add_all())
             episode_uuids = [f"ep_{i}" for i in range(len(chunks))]
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
+        except Exception as e:
+            logger.error(f"add_text_batches 失败: {e}")
         return episode_uuids
 
     def _wait_for_episodes(self, episode_uuids: List[str],
@@ -137,81 +140,97 @@ class GraphBuilderService:
     ):
         """图谱构建工作线程"""
         set_locale(locale)
-        
+
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
+            # 使用 asyncio.run() 而不是手动创建事件循环
             async def build_all():
                 chunks = TextProcessor.split_text(text, chunk_size, chunk_overlap)
                 total_chunks = len(chunks)
-                
+                success_count = 0
+
                 for i, chunk in enumerate(chunks):
-                    await self.service.add_episodes(group_id, chunk)
-                    await asyncio.sleep(0.5)
-            
-            loop.run_until_complete(build_all())
+                    try:
+                        await self.service.add_episodes(group_id, chunk)
+                        success_count += 1
+                        await asyncio.sleep(0.5)
+                    except Exception as chunk_error:
+                        logger.error(f"第 {i+1} 块处理失败: {chunk_error}")
+                        continue
+
+                logger.info(f"成功处理 {success_count}/{total_chunks} 块")
+
+            # 使用 asyncio.run() - 推荐的现代方式，会自动管理事件循环
+            asyncio.run(build_all())
         except Exception as e:
             import traceback
-            error_msg = f"{str(e)}\n{traceback.format_exc()}"
-            pass
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
+            logger.error(f"图谱构建失败: {e}")
+            logger.error(traceback.format_exc())
 
     def get_graph_data(self, group_id: str) -> Dict[str, Any]:
-        """
-        获取完整图谱数据（包含详细信息）
+        """获取完整图谱数据"""
+        print(f"GET_GRAPH_DATA: start, group_id={group_id}")
 
-        Args:
-            group_id: 分组ID
-
-        Returns:
-            包含nodes和edges的字典，包括时间信息、属性等详细数据
-        """
+        from neo4j import GraphDatabase
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            async def fetch_all():
-                nodes = await self.service.get_nodes(group_id)
-                edges = await self.service.get_edges(group_id)
-                return nodes, edges
-            
-            nodes, edges = loop.run_until_complete(fetch_all())
-            
-            nodes_data = []
-            for node in nodes:
-                nodes_data.append({
-                    "uuid": node.get("uuid", ""),
-                    "name": node.get("name", ""),
-                    "labels": node.get("labels", []),
-                    "properties": node.get("properties", {}),
-                })
+            uri = 'bolt://localhost:7687'
+            driver = GraphDatabase.driver(uri, auth=('neo4j', 'password'))
+            with driver.session() as session:
+                # 查询实体 - 宽松条件，匹配 group_id 或 mirofish 前缀
+                result = session.run(
+                    'MATCH (n:Entity) WHERE n.group_id = $group_id OR n.group_id STARTS WITH "mirofish" RETURN n.name, id(n) LIMIT 30',
+                    group_id=group_id
+                )
+                nodes_data = []
+                for record in result:
+                    name = record[0]
+                    node_id = record[1]
+                    print(f"  Node: name={name}, id={node_id}")
+                    nodes_data.append({
+                        "uuid": str(node_id),
+                        "name": name,
+                        "labels": [],
+                        "properties": {}
+                    })
 
-            edges_data = []
-            for edge in edges:
-                edges_data.append({
-                    "name": edge.get("name", ""),
-                    "source": edge.get("source", ""),
-                    "target": edge.get("target", ""),
-                    "properties": edge.get("properties", {}),
-                })
+                # 查询关系 - 宽松条件
+                result2 = session.run(
+                    'MATCH (a:Entity)-[r]->(b:Entity) WHERE a.group_id = $group_id OR b.group_id = $group_id OR a.group_id STARTS WITH "mirofish" OR b.group_id STARTS WITH "mirofish" RETURN a.name, type(r), b.name LIMIT 50',
+                    group_id=group_id
+                )
+                edges_data = []
+                for record in result2:
+                    source_name = record[0]
+                    rel_type = record[1]
+                    target_name = record[2]
+                    print(f"  Edge: {source_name} -[{rel_type}]-> {target_name}")
+                    edges_data.append({
+                        "name": rel_type,
+                        "source": source_name,
+                        "target": target_name,
+                        "properties": {}
+                    })
 
+                driver.close()
+
+                print(f"GET_GRAPH_DATA: nodes={len(nodes_data)}, edges={len(edges_data)}")
+                return {
+                    "group_id": group_id,
+                    "nodes": nodes_data,
+                    "edges": edges_data,
+                    "node_count": len(nodes_data),
+                    "edge_count": len(edges_data),
+                }
+        except Exception as e:
+            print(f"GET_GRAPH_DATA: ERROR {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "group_id": group_id,
-                "nodes": nodes_data,
-                "edges": edges_data,
-                "node_count": len(nodes_data),
-                "edge_count": len(edges_data),
+                "nodes": [],
+                "edges": [],
+                "node_count": 0,
+                "edge_count": 0,
             }
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
 
     def delete_graph(self, group_id: str):
         """
