@@ -185,9 +185,11 @@ class GraphBuilderService:
                     name = record[0]
                     node_id = record[1]
                     print(f"  Node: name={name}, id={node_id}")
+                    # 添加前端需要的字段
                     nodes_data.append({
-                        "uuid": str(node_id),
+                        "uuid": str(name),  # 前端用 name 作为 ID
                         "name": name,
+                        "name_orig": str(node_id),  # 原始 Neo4j id
                         "labels": [],
                         "properties": {}
                     })
@@ -203,10 +205,13 @@ class GraphBuilderService:
                     rel_type = record[1]
                     target_name = record[2]
                     print(f"  Edge: {source_name} -[{rel_type}]-> {target_name}")
+                    # 添加前端期望的字段名
                     edges_data.append({
                         "name": rel_type,
                         "source": source_name,
                         "target": target_name,
+                        "source_node_uuid": source_name,  # 前端筛选用
+                        "target_node_uuid": target_name,
                         "properties": {}
                     })
 
