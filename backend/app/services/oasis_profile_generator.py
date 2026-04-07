@@ -9,7 +9,7 @@ OASIS Agent Profile生成器
 
 import json
 import random
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -18,7 +18,6 @@ from openai import OpenAI
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, get_locale, set_locale, t
-from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.oasis_profile')
 
@@ -193,38 +192,43 @@ class OasisProfileGenerator:
         )
     
     def generate_profile_from_entity(
-        self, 
-        entity: EntityNode, 
+        self,
+        entity: Dict[str, Any],
         user_id: int,
         use_llm: bool = True
     ) -> OasisAgentProfile:
         """
-        从Zep实体生成OASIS Agent Profile
-        
+        从实体节点生成OASIS Agent Profile
+
         Args:
-            entity: Zep实体节点
+            entity: 实体节点字典，包含 uuid, name, labels, summary, attributes 等字段
             user_id: 用户ID（用于OASIS）
             use_llm: 是否使用LLM生成详细人设
-            
+
         Returns:
             OasisAgentProfile
         """
-        entity_type = entity.get_entity_type() or "Entity"
-        
+        # 获取实体类型
+        entity_type = self._get_entity_type(entity) or "Entity"
+
         # 基础信息
-        name = entity.name
+        name = entity.get("name", "Unknown")
         user_name = self._generate_username(name)
-        
+
         # 构建上下文信息
         context = self._build_entity_context(entity)
-        
+
+        # 获取实体摘要和属性
+        summary = entity.get("summary", "") or ""
+        attributes = entity.get("attributes", {}) or {}
+
         if use_llm:
             # 使用LLM生成详细人设
             profile_data = self._generate_profile_with_llm(
                 entity_name=name,
                 entity_type=entity_type,
-                entity_summary=entity.summary,
-                entity_attributes=entity.attributes,
+                entity_summary=summary,
+                entity_attributes=attributes,
                 context=context
             )
         else:
@@ -232,16 +236,16 @@ class OasisProfileGenerator:
             profile_data = self._generate_profile_rule_based(
                 entity_name=name,
                 entity_type=entity_type,
-                entity_summary=entity.summary,
-                entity_attributes=entity.attributes
+                entity_summary=summary,
+                entity_attributes=attributes
             )
-        
+
         return OasisAgentProfile(
             user_id=user_id,
             user_name=user_name,
             name=name,
             bio=profile_data.get("bio", f"{entity_type}: {name}"),
-            persona=profile_data.get("persona", entity.summary or f"A {entity_type} named {name}."),
+            persona=profile_data.get("persona", summary or f"A {entity_type} named {name}."),
             karma=profile_data.get("karma", random.randint(500, 5000)),
             friend_count=profile_data.get("friend_count", random.randint(50, 500)),
             follower_count=profile_data.get("follower_count", random.randint(100, 1000)),
@@ -252,9 +256,22 @@ class OasisProfileGenerator:
             country=profile_data.get("country"),
             profession=profile_data.get("profession"),
             interested_topics=profile_data.get("interested_topics", []),
-            source_entity_uuid=entity.uuid,
+            source_entity_uuid=entity.get("uuid", ""),
             source_entity_type=entity_type,
         )
+
+    def _get_entity_type(self, entity: Dict[str, Any]) -> Optional[str]:
+        """从实体字典中获取实体类型"""
+        # 优先从 entity_type 字段获取
+        if entity.get("entity_type"):
+            return entity["entity_type"]
+        # 其次从 labels 中过滤掉 Entity 和 Node
+        labels = entity.get("labels", [])
+        if labels:
+            for label in labels:
+                if label not in ["Entity", "Node"]:
+                    return label
+        return None
     
     def _generate_username(self, name: str) -> str:
         """生成用户名"""
@@ -266,91 +283,97 @@ class OasisProfileGenerator:
         suffix = random.randint(100, 999)
         return f"{username}_{suffix}"
     
-    def _search_zep_for_entity(self, entity: EntityNode) -> Dict[str, Any]:
+    def _search_entity_context(self, entity: Dict[str, Any]) -> Dict[str, Any]:
         """
         搜索图谱获取实体相关的丰富信息（简化版）
 
         Args:
-            entity: 实体节点对象
+            entity: 实体节点字典
 
         Returns:
             包含facts, node_summaries, context的字典
         """
         # TODO: 待图谱检索功能实现后替换
         return {"facts": [], "node_summaries": [], "context": ""}
-    
-    def _build_entity_context(self, entity: EntityNode) -> str:
+
+    def _build_entity_context(self, entity: Dict[str, Any]) -> str:
         """
         构建实体的完整上下文信息
-        
+
         包括：
         1. 实体本身的边信息（事实）
         2. 关联节点的详细信息
-        3. Zep混合检索到的丰富信息
+        3. 图谱检索到的丰富信息
         """
         context_parts = []
-        
+
         # 1. 添加实体属性信息
-        if entity.attributes:
+        attributes = entity.get("attributes", {}) or {}
+        if attributes:
             attrs = []
-            for key, value in entity.attributes.items():
+            for key, value in attributes.items():
                 if value and str(value).strip():
                     attrs.append(f"- {key}: {value}")
             if attrs:
-                context_parts.append("### 实体属性\n" + "\n".join(attrs))
-        
+                context_parts.append("### Entity Attributes\n" + "\n".join(attrs))
+
         # 2. 添加相关边信息（事实/关系）
+        # 注：Graphiti 返回的边在 entity.get("edges") 中
         existing_facts = set()
-        if entity.related_edges:
+        edges = entity.get("edges", []) or []
+        if edges:
             relationships = []
-            for edge in entity.related_edges:  # 不限制数量
+            for edge in edges:
                 fact = edge.get("fact", "")
-                edge_name = edge.get("edge_name", "")
+                edge_name = edge.get("name", "") or edge.get("fact_type", "")
                 direction = edge.get("direction", "")
-                
+
                 if fact:
                     relationships.append(f"- {fact}")
                     existing_facts.add(fact)
                 elif edge_name:
+                    entity_name = entity.get("name", "")
                     if direction == "outgoing":
-                        relationships.append(f"- {entity.name} --[{edge_name}]--> (相关实体)")
+                        relationships.append(f"- {entity_name} --[{edge_name}]--> (related entity)")
                     else:
-                        relationships.append(f"- (相关实体) --[{edge_name}]--> {entity.name}")
-            
+                        relationships.append(f"- (related entity) --[{edge_name}]--> {entity_name}")
+
             if relationships:
-                context_parts.append("### 相关事实和关系\n" + "\n".join(relationships))
-        
+                context_parts.append("### Related Facts and Relationships\n" + "\n".join(relationships))
+
         # 3. 添加关联节点的详细信息
-        if entity.related_nodes:
+        # 注：Graphiti 返回的关联节点在 entity.get("related_nodes") 中
+        related_nodes = entity.get("related_nodes", []) or []
+        if related_nodes:
             related_info = []
-            for node in entity.related_nodes:  # 不限制数量
+            for node in related_nodes:
                 node_name = node.get("name", "")
                 node_labels = node.get("labels", [])
                 node_summary = node.get("summary", "")
-                
+
                 # 过滤掉默认标签
                 custom_labels = [l for l in node_labels if l not in ["Entity", "Node"]]
                 label_str = f" ({', '.join(custom_labels)})" if custom_labels else ""
-                
+
                 if node_summary:
                     related_info.append(f"- **{node_name}**{label_str}: {node_summary}")
                 else:
                     related_info.append(f"- **{node_name}**{label_str}")
-            
+
             if related_info:
-                context_parts.append("### 关联实体信息\n" + "\n".join(related_info))
-        
+                context_parts.append("### Related Entity Information\n" + "\n".join(related_info))
+
         # 4. 图谱检索获取更丰富的信息（预留）
-        zep_results = self._search_zep_for_entity(entity)
+        search_results = self._search_entity_context(entity)
 
-        if zep_results.get("facts"):
+        if search_results.get("facts"):
             # 去重：排除已存在的事实
-            new_facts = [f for f in zep_results["facts"] if f not in existing_facts]
+            new_facts = [f for f in search_results["facts"] if f not in existing_facts]
             if new_facts:
-                context_parts.append("### 检索到的事实信息\n" + "\n".join(f"- {f}" for f in new_facts[:15]))
+                context_parts.append("### Retrieved Facts\n" + "\n".join(f"- {f}" for f in new_facts[:15]))
 
-        if zep_results.get("node_summaries"):
-            context_parts.append("### 检索到的相关节点\n" + "\n".join(f"- {s}" for s in zep_results["node_summaries"][:10]))
+        if search_results.get("node_summaries"):
+            context_parts.append("### Retrieved Related Nodes\n" + "\n".join(f"- {s}" for s in search_results["node_summaries"][:10]))
 
         return "\n\n".join(context_parts)
     
@@ -719,7 +742,7 @@ class OasisProfileGenerator:
 
     def generate_profiles_from_entities(
         self,
-        entities: List[EntityNode],
+        entities: List[Dict[str, Any]],
         use_llm: bool = True,
         progress_callback: Optional[callable] = None,
         parallel_count: int = 5,
@@ -782,33 +805,34 @@ class OasisProfileGenerator:
         # Capture locale before spawning thread pool workers
         current_locale = get_locale()
 
-        def generate_single_profile(idx: int, entity: EntityNode) -> tuple:
+        def generate_single_profile(idx: int, entity: Dict[str, Any]) -> tuple:
             """生成单个profile的工作函数"""
             set_locale(current_locale)
-            entity_type = entity.get_entity_type() or "Entity"
-            
+            entity_type = self._get_entity_type(entity) or "Entity"
+            entity_name = entity.get("name", "Unknown")
+
             try:
                 profile = self.generate_profile_from_entity(
                     entity=entity,
                     user_id=idx,
                     use_llm=use_llm
                 )
-                
+
                 # 实时输出生成的人设到控制台和日志
-                self._print_generated_profile(entity.name, entity_type, profile)
-                
+                self._print_generated_profile(entity_name, entity_type, profile)
+
                 return idx, profile, None
-                
+
             except Exception as e:
-                logger.error(f"生成实体 {entity.name} 的人设失败: {str(e)}")
+                logger.error(f"生成实体 {entity_name} 的人设失败: {str(e)}")
                 # 创建一个基础profile
                 fallback_profile = OasisAgentProfile(
                     user_id=idx,
-                    user_name=self._generate_username(entity.name),
-                    name=entity.name,
-                    bio=f"{entity_type}: {entity.name}",
-                    persona=entity.summary or f"A participant in social discussions.",
-                    source_entity_uuid=entity.uuid,
+                    user_name=self._generate_username(entity_name),
+                    name=entity_name,
+                    bio=f"{entity_type}: {entity_name}",
+                    persona=entity.get("summary", "") or "A participant in social discussions.",
+                    source_entity_uuid=entity.get("uuid", ""),
                     source_entity_type=entity_type,
                 )
                 return idx, fallback_profile, str(e)
@@ -829,42 +853,43 @@ class OasisProfileGenerator:
             # 收集结果
             for future in concurrent.futures.as_completed(future_to_entity):
                 idx, entity = future_to_entity[future]
-                entity_type = entity.get_entity_type() or "Entity"
-                
+                entity_type = self._get_entity_type(entity) or "Entity"
+                entity_name = entity.get("name", "Unknown")
+
                 try:
                     result_idx, profile, error = future.result()
                     profiles[result_idx] = profile
-                    
+
                     with lock:
                         completed_count[0] += 1
                         current = completed_count[0]
-                    
+
                     # 实时写入文件
                     save_profiles_realtime()
-                    
+
                     if progress_callback:
                         progress_callback(
-                            current, 
-                            total, 
-                            f"已完成 {current}/{total}: {entity.name}（{entity_type}）"
+                            current,
+                            total,
+                            f"已完成 {current}/{total}: {entity_name}（{entity_type}）"
                         )
-                    
+
                     if error:
-                        logger.warning(f"[{current}/{total}] {entity.name} 使用备用人设: {error}")
+                        logger.warning(f"[{current}/{total}] {entity_name} 使用备用人设: {error}")
                     else:
-                        logger.info(f"[{current}/{total}] 成功生成人设: {entity.name} ({entity_type})")
-                        
+                        logger.info(f"[{current}/{total}] 成功生成人设: {entity_name} ({entity_type})")
+
                 except Exception as e:
-                    logger.error(f"处理实体 {entity.name} 时发生异常: {str(e)}")
+                    logger.error(f"处理实体 {entity_name} 时发生异常: {str(e)}")
                     with lock:
                         completed_count[0] += 1
                     profiles[idx] = OasisAgentProfile(
                         user_id=idx,
-                        user_name=self._generate_username(entity.name),
-                        name=entity.name,
-                        bio=f"{entity_type}: {entity.name}",
-                        persona=entity.summary or "A participant in social discussions.",
-                        source_entity_uuid=entity.uuid,
+                        user_name=self._generate_username(entity_name),
+                        name=entity_name,
+                        bio=f"{entity_type}: {entity_name}",
+                        persona=entity.get("summary", "") or "A participant in social discussions.",
+                        source_entity_uuid=entity.get("uuid", ""),
                         source_entity_type=entity_type,
                     )
                     # 实时写入文件（即使是备用人设）

@@ -14,6 +14,9 @@ from .graphiti_service import GraphitiService
 from ..models.task import TaskManager
 from .text_processor import TextProcessor
 from ..utils.locale import get_locale, set_locale
+from ..utils.logger import get_logger
+
+logger = get_logger('mirofish.graph_builder')
 
 
 @dataclass
@@ -167,7 +170,7 @@ class GraphBuilderService:
             logger.error(traceback.format_exc())
 
     def get_graph_data(self, group_id: str) -> Dict[str, Any]:
-        """获取完整图谱数据"""
+        """获取完整图谱数据（包含丰富的节点和边信息）"""
         print(f"GET_GRAPH_DATA: start, group_id={group_id}")
 
         from neo4j import GraphDatabase
@@ -175,44 +178,115 @@ class GraphBuilderService:
             uri = 'bolt://localhost:7687'
             driver = GraphDatabase.driver(uri, auth=('neo4j', 'password'))
             with driver.session() as session:
-                # 查询实体 - 宽松条件，匹配 group_id 或 mirofish 前缀
+                # 查询实体 - 获取完整的节点属性
                 result = session.run(
-                    'MATCH (n:Entity) WHERE n.group_id = $group_id OR n.group_id STARTS WITH "mirofish" RETURN n.name, id(n) LIMIT 30',
+                    '''MATCH (n:Entity) WHERE n.group_id = $group_id OR n.group_id STARTS WITH "mirofish"
+                    RETURN n.name, id(n), labels(n), n.summary, n.entity_type, n.created_at, n.attributes, n.uuid''',
                     group_id=group_id
                 )
-                nodes_data = []
-                for record in result:
-                    name = record[0]
-                    node_id = record[1]
-                    print(f"  Node: name={name}, id={node_id}")
-                    # 添加前端需要的字段
-                    nodes_data.append({
-                        "uuid": str(name),  # 前端用 name 作为 ID
-                        "name": name,
-                        "name_orig": str(node_id),  # 原始 Neo4j id
-                        "labels": [],
-                        "properties": {}
-                    })
 
-                # 查询关系 - 宽松条件
+                # 先收集所有边信息，用于为没有摘要的节点生成备用摘要
                 result2 = session.run(
-                    'MATCH (a:Entity)-[r]->(b:Entity) WHERE a.group_id = $group_id OR b.group_id = $group_id OR a.group_id STARTS WITH "mirofish" OR b.group_id STARTS WITH "mirofish" RETURN a.name, type(r), b.name LIMIT 50',
+                    '''MATCH (a:Entity)-[r]->(b:Entity)
+                    WHERE a.group_id = $group_id OR b.group_id = $group_id OR a.group_id STARTS WITH "mirofish" OR b.group_id STARTS WITH "mirofish"
+                    RETURN a.name, type(r), b.name, r.name, r.fact, r.summary, r.created_at, r.attributes, a.uuid, b.uuid''',
                     group_id=group_id
                 )
+
+                # 构建节点的 facts 映射（从边中收集与该节点相关的事实）
+                node_facts = {}  # node_name -> list of facts
                 edges_data = []
                 for record in result2:
                     source_name = record[0]
                     rel_type = record[1]
                     target_name = record[2]
-                    print(f"  Edge: {source_name} -[{rel_type}]-> {target_name}")
-                    # 添加前端期望的字段名
+                    rel_name = record[3] or ""
+                    fact = record[4] or ""
+                    summary = record[5] or ""
+                    created_at = record[6]
+                    attributes = record[7] or {}
+                    source_uuid = record[8] or source_name
+                    target_uuid = record[9] or target_name
+
+                    print(f"  Edge: {source_name} -[{rel_type}]-> {target_name}, fact={fact[:30] if fact else 'None'}...")
+
+                    # 解析 attributes
+                    if isinstance(attributes, str):
+                        import json
+                        try:
+                            attributes = json.loads(attributes)
+                        except:
+                            attributes = {}
+
                     edges_data.append({
-                        "name": rel_type,
-                        "source": source_name,
-                        "target": target_name,
-                        "source_node_uuid": source_name,  # 前端筛选用
-                        "target_node_uuid": target_name,
-                        "properties": {}
+                        "name": rel_name or rel_type,
+                        "fact": fact,
+                        "summary": summary,
+                        "source": source_uuid,
+                        "target": target_uuid,
+                        "source_node_uuid": source_uuid,
+                        "target_node_uuid": target_uuid,
+                        "fact_type": rel_type,
+                        "attributes": attributes,
+                        "created_at": str(created_at) if created_at else None,
+                        "properties": attributes,
+                    })
+
+                    # 收集 source 和 target 的 facts
+                    if fact:
+                        if source_name not in node_facts:
+                            node_facts[source_name] = []
+                        if fact not in node_facts[source_name]:
+                            node_facts[source_name].append(fact)
+                        if target_name not in node_facts:
+                            node_facts[target_name] = []
+                        if fact not in node_facts[target_name]:
+                            node_facts[target_name].append(fact)
+
+                # 处理节点
+                nodes_data = []
+                for record in result:
+                    name = record[0]
+                    node_id = record[1]
+                    labels = record[2] or []
+                    summary = record[3] or ""
+                    entity_type = record[4] or ""
+                    created_at = record[5]
+                    attributes = record[6] or {}
+                    uuid = record[7] or str(node_id)
+
+                    print(f"  Node: name={name}, labels={labels}, summary={summary[:50] if summary else 'None'}...")
+
+                    # 解析 attributes
+                    if isinstance(attributes, str):
+                        import json
+                        try:
+                            attributes = json.loads(attributes)
+                        except:
+                            attributes = {}
+
+                    # 合并 labels 和 entity_type
+                    node_labels = labels.copy() if labels else []
+                    if entity_type and entity_type not in node_labels:
+                        node_labels.append(entity_type)
+
+                    # 如果节点没有 summary，尝试从相关的 facts 生成
+                    node_summary = summary
+                    if not node_summary and name in node_facts:
+                        # 用相关的事实拼接成摘要
+                        facts = node_facts[name][:3]  # 最多取3个
+                        if facts:
+                            node_summary = " | ".join(facts)
+
+                    nodes_data.append({
+                        "uuid": uuid,
+                        "name": name,
+                        "labels": node_labels,
+                        "summary": node_summary,
+                        "entity_type": entity_type,
+                        "attributes": attributes,
+                        "created_at": str(created_at) if created_at else None,
+                        "name_orig": str(node_id),
                     })
 
                 driver.close()
@@ -235,6 +309,7 @@ class GraphBuilderService:
                 "edges": [],
                 "node_count": 0,
                 "edge_count": 0,
+                "error": str(e),
             }
 
     def delete_graph(self, group_id: str):

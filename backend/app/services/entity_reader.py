@@ -27,19 +27,20 @@ class EntityReader:
     def get_node_edges(self, group_id: str, node_uuid: str) -> List[Dict[str, Any]]:
         """获取指定节点的所有相关边"""
         edges = asyncio.run(self.service.get_edges(group_id))
-        return [e for e in edges if e.get("source") == node_uuid or e.get("target") == node_uuid]
+        return [e for e in edges if e.get("source_node_uuid") == node_uuid or e.get("target_node_uuid") == node_uuid or e.get("source") == node_uuid or e.get("target") == node_uuid]
 
     def filter_defined_entities(self, group_id: str, entity_types: List[str]) -> List[Dict[str, Any]]:
         """筛选符合预定义实体类型的节点"""
         nodes = asyncio.run(self.service.get_nodes(group_id))
-        return [n for n in nodes if n.get("type") in entity_types]
+        # 检查 labels 或 entity_type 字段
+        return [n for n in nodes if n.get("entity_type") in entity_types or any(label in entity_types for label in n.get("labels", []))]
 
     def get_entity_with_context(self, group_id: str, entity_uuid: str) -> Dict[str, Any]:
         """获取单个实体及其完整上下文"""
         node = {}
         nodes = asyncio.run(self.service.get_nodes(group_id))
         for n in nodes:
-            if n.get("uuid") == entity_uuid:
+            if n.get("uuid") == entity_uuid or n.get("name") == entity_uuid:
                 node = n
                 break
 

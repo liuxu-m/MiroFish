@@ -21,9 +21,17 @@ from openai import OpenAI
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, t
-from .zep_entity_reader import EntityNode, ZepEntityReader
 
 logger = get_logger('mirofish.simulation_config')
+
+# Zep 服务 - 可选导入
+try:
+    from .zep_entity_reader import EntityNode, ZepEntityReader
+    HAS_ZEP = True
+except ImportError:
+    HAS_ZEP = False
+    EntityNode = None
+    ZepEntityReader = None
 
 # 中国作息时间配置（北京时间）
 CHINA_TIMEZONE_CONFIG = {

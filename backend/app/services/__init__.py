@@ -5,11 +5,10 @@
 from .ontology_generator import OntologyGenerator
 from .graph_builder import GraphBuilderService
 from .text_processor import TextProcessor
-from .zep_entity_reader import ZepEntityReader, EntityNode, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_manager import SimulationManager, SimulationState, SimulationStatus
 from .simulation_config_generator import (
-    SimulationConfigGenerator, 
+    SimulationConfigGenerator,
     SimulationParameters,
     AgentActivityConfig,
     TimeSimulationConfig,
@@ -22,11 +21,6 @@ from .simulation_runner import (
     RunnerStatus,
     AgentAction,
     RoundSummary
-)
-from .zep_graph_memory_updater import (
-    ZepGraphMemoryUpdater,
-    ZepGraphMemoryManager,
-    AgentActivity
 )
 from .simulation_ipc import (
     SimulationIPCClient,
@@ -41,13 +35,28 @@ from .graphiti_tools import GraphitiToolsService
 from .entity_reader import EntityReader
 from .memory_updater import MemoryUpdater
 
+# Zep 服务 - 可选导入（仅当 zep_cloud 已安装时）
+try:
+    from .zep_entity_reader import ZepEntityReader, EntityNode, FilteredEntities
+    from .zep_graph_memory_updater import (
+        ZepGraphMemoryUpdater,
+        ZepGraphMemoryManager,
+        AgentActivity
+    )
+    HAS_ZEP = True
+except ImportError:
+    HAS_ZEP = False
+    ZepEntityReader = None
+    EntityNode = None
+    FilteredEntities = None
+    ZepGraphMemoryUpdater = None
+    ZepGraphMemoryManager = None
+    AgentActivity = None
+
 __all__ = [
     'OntologyGenerator',
     'GraphBuilderService',
     'TextProcessor',
-    'ZepEntityReader',
-    'EntityNode',
-    'FilteredEntities',
     'OasisProfileGenerator',
     'OasisAgentProfile',
     'SimulationManager',
@@ -64,9 +73,6 @@ __all__ = [
     'RunnerStatus',
     'AgentAction',
     'RoundSummary',
-    'ZepGraphMemoryUpdater',
-    'ZepGraphMemoryManager',
-    'AgentActivity',
     'SimulationIPCClient',
     'SimulationIPCServer',
     'IPCCommand',
@@ -79,5 +85,13 @@ __all__ = [
     'GraphitiToolsService',
     'EntityReader',
     'MemoryUpdater',
+    # Zep services (optional)
+    'ZepEntityReader',
+    'EntityNode',
+    'FilteredEntities',
+    'ZepGraphMemoryUpdater',
+    'ZepGraphMemoryManager',
+    'AgentActivity',
+    'HAS_ZEP',
 ]
 

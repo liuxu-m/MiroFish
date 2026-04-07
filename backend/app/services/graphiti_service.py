@@ -19,12 +19,9 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, Field
 
-try:
-    from langchain_openai import ChatOpenAI
-    HAS_LANGCHAIN = True
-except ImportError:
-    HAS_LANGCHAIN = False
-    logging.warning("LangChain not installed, using legacy client")
+# LangChain 导入 - 延迟到函数内部，避免 torch DLL 问题
+# 在 Windows 上 torch 的 shm.dll 可能无法加载，导致整个模块导入失败
+HAS_LANGCHAIN = False
 
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
@@ -69,9 +66,17 @@ else:
 
 def get_langchain_llm(temperature: float = 0.3):
     """获取 LangChain MiniMax LLM 实例（推荐方案）"""
+    global HAS_LANGCHAIN
     if not HAS_LANGCHAIN:
-        raise ImportError("LangChain not installed")
+        # 尝试动态导入 langchain_openai
+        try:
+            from langchain_openai import ChatOpenAI
+            HAS_LANGCHAIN = True
+        except Exception as e:
+            logging.warning(f"LangChain import failed: {e}")
+            raise ImportError("LangChain not installed or failed to load")
 
+    from langchain_openai import ChatOpenAI
     return ChatOpenAI(
         model='MiniMax-M2.7',
         temperature=temperature,
@@ -343,6 +348,25 @@ class MiniMaxCompatibleClient(LLMClient):
                 if entities:
                     result = json.dumps(entities)
                     log(f'从 Markdown 提取到 {len(entities)} 个实体')
+
+            # 方法3.5: 处理 **Name**: "summary" 格式的 Markdown 摘要响应
+            if '**' in result and '": "' in result:
+                log(f'检测到 **Name**: "summary" 格式的 Markdown 摘要')
+                summaries = []
+                # 匹配 **实体名**: "摘要内容" 格式
+                summary_pattern = r'\*\*([^*]+)\*\*:\s*"([^"]*)"'
+                for match in re.finditer(summary_pattern, result):
+                    entity_name = match.group(1).strip()
+                    entity_summary = match.group(2).strip()
+                    summaries.append({
+                        "name": entity_name,
+                        "summary": entity_summary
+                    })
+                if summaries:
+                    parsed = {"summaries": summaries}
+                    log(f'从 Markdown 摘要格式提取到 {len(summaries)} 个摘要')
+                    # 直接返回，因为已经是正确格式
+                    return parsed
             
             # 方法4: 尝试提取 JSON 对象（贪婪匹配最外层大括号）
             if not result.startswith('{') and not result.startswith('['):
@@ -430,12 +454,33 @@ class MiniMaxCompatibleClient(LLMClient):
                             else:
                                 log(f'未知的 dict 结构: {parsed}')
                     
-                    # ExtractedEdges 格式: {"edges": [...]}
+                    # ExtractedEdges 格式: {"edges": [...]} 或直接数组
                     elif 'ExtractedEdges' in model_name or 'Edge' in str(response_model.model_fields):
                         log(f'ExtractedEdges 原始数据: {parsed}')
                         if isinstance(parsed, list):
-                            parsed = {"edges": parsed}
-                            log(f'转换为: {parsed}')
+                            # MiniMax 返回的是数组，需要转换字段名
+                            converted_edges = []
+                            for edge in parsed:
+                                if isinstance(edge, dict):
+                                    converted_edge = {}
+                                    # 转换字段名
+                                    if 'source_entity_name' in edge:
+                                        converted_edge['source_node_name'] = edge['source_entity_name']
+                                    if 'target_entity_name' in edge:
+                                        converted_edge['target_node_name'] = edge['target_entity_name']
+                                    if 'relation_type' in edge:
+                                        converted_edge['name'] = edge['relation_type']
+                                    if 'fact' in edge:
+                                        converted_edge['fact'] = edge['fact']
+                                    if 'valid_at' in edge:
+                                        converted_edge['valid_at'] = edge['valid_at']
+                                    # 保留原始字段（以防需要）
+                                    for k, v in edge.items():
+                                        if k not in converted_edge:
+                                            converted_edge[k] = v
+                                    converted_edges.append(converted_edge)
+                            parsed = {"edges": converted_edges}
+                            log(f'ExtractedEdges 数组转换后: {converted_edges[:2]}...')
                         elif isinstance(parsed, dict) and 'edges' not in parsed:
                             if 'head' in parsed:
                                 parsed = {"edges": parsed['head']}
@@ -445,7 +490,58 @@ class MiniMaxCompatibleClient(LLMClient):
                                 parsed = {"edges": parsed['relations']}
                             else:
                                 log(f'未知的 dict 结构: {parsed}')
-                    
+
+                    # SummarizedEntities 格式: {"summaries": [{"name": "...", "summary": "..."}]}
+                    elif 'SummarizedEntities' in model_name or 'Summary' in model_name:
+                        log(f'SummarizedEntities 原始数据: {parsed}')
+                        if isinstance(parsed, dict):
+                            # 检查是否有 summaries 字段
+                            if 'summaries' not in parsed:
+                                # 尝试从其他格式转换
+                                summaries = []
+                                # 可能是 {"summary": "..."} 格式（单个摘要）
+                                if 'summary' in parsed and 'name' in parsed:
+                                    summaries = [parsed]
+                                # 可能是 {"entity_summaries": [...]} 格式
+                                elif 'entity_summaries' in parsed:
+                                    summaries = parsed['entity_summaries']
+                                # 可能是 {"summaries_list": [...]} 格式
+                                elif 'summaries_list' in parsed:
+                                    summaries = parsed['summaries_list']
+                                # 遍历所有键查找可能的摘要数组
+                                else:
+                                    for key, value in parsed.items():
+                                        if isinstance(value, list) and len(value) > 0:
+                                            first_item = value[0]
+                                            if isinstance(first_item, dict) and 'summary' in first_item:
+                                                summaries = value
+                                                break
+
+                                if summaries:
+                                    # 转换字段名
+                                    converted = []
+                                    for item in summaries:
+                                        if isinstance(item, dict):
+                                            # 确保有 name 和 summary 字段
+                                            converted_item = {}
+                                            if 'name' in item:
+                                                converted_item['name'] = item['name']
+                                            elif 'entity_name' in item:
+                                                converted_item['name'] = item['entity_name']
+                                            if 'summary' in item:
+                                                converted_item['summary'] = item['summary']
+                                            elif 'entity_summary' in item:
+                                                converted_item['summary'] = item['entity_summary']
+                                            if converted_item.get('name') and converted_item.get('summary'):
+                                                converted.append(converted_item)
+                                    if converted:
+                                        parsed = {"summaries": converted}
+                                        log(f'SummarizedEntities 转换后: {parsed}')
+                                elif 'summary' in parsed:
+                                    # 只有摘要内容，没有实体名，无法使用
+                                    log(f'警告: SummarizedEntities 没有实体名，返回空')
+                                    parsed = {"summaries": []}
+
                 log(f'最终解析结果类型: {type(parsed).__name__}')
                 return parsed
             except json.JSONDecodeError as e:
@@ -561,42 +657,69 @@ class GraphitiService:
     async def add_episodes(
         self,
         group_id: str,
-        content: str
+        content: str,
+        max_retries: int = 2
     ) -> Dict[str, Any]:
         """
         添加文本到知识图谱
         Args:
             group_id: 分组ID
             content: 要添加的文本内容
+            max_retries: 最大重试次数
         Returns:
             添加结果
         """
         graphiti = self._create_graphiti()
-        try:
-            result = await graphiti.add_episode(
-                name=f"Episode_{group_id}",
-                episode_body=content,
-                source_description="MiroFish simulation data",
-                group_id=group_id,
-                reference_time=datetime.now()
-            )
-            return {
-                "success": True,
-                "group_id": group_id,
-                "message": "Episode added successfully",
-                "result": result
-            }
-        except Exception as e:
-            import traceback
-            logger.error(f"add_episodes 错误: {e}")
-            logger.error(traceback.format_exc())
-            return {
-                "success": False,
-                "group_id": group_id,
-                "error": str(e)
-            }
-        finally:
-            await graphiti.close()
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                result = await graphiti.add_episode(
+                    name=f"Episode_{group_id}",
+                    episode_body=content,
+                    source_description="MiroFish simulation data",
+                    group_id=group_id,
+                    reference_time=datetime.now()
+                )
+                await graphiti.close()
+                return {
+                    "success": True,
+                    "group_id": group_id,
+                    "message": "Episode added successfully",
+                    "result": str(result) if result else None
+                }
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+
+                # 检查是否是 summarization 验证错误
+                if "SummarizedEntities" in error_str and "summaries" in error_str:
+                    logger.warning(f"实体摘要提取失败 (尝试 {attempt+1}/{max_retries}): {error_str[:100]}")
+
+                    # 如果还有重试机会，尝试继续（跳过这个chunk）
+                    if attempt < max_retries - 1:
+                        import asyncio
+                        await asyncio.sleep(1)  # 等待一下再重试
+                        continue
+                else:
+                    # 其他错误，直接返回失败
+                    logger.error(f"add_episodes 错误: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    break
+            finally:
+                try:
+                    await graphiti.close()
+                except:
+                    pass
+
+        # 所有重试都失败
+        return {
+            "success": False,
+            "group_id": group_id,
+            "error": f"实体摘要提取失败: {last_error}",
+            "partial": True  # 标记为部分成功，文本可能已添加但没有摘要
+        }
     async def search(
         self,
         group_id: str,
@@ -641,104 +764,66 @@ class GraphitiService:
         Args:
             group_id: 分组ID
         Returns:
-            节点列表
+            节点列表（包含丰富的属性）
         """
-        graphiti = self._create_graphiti()
+        from neo4j import GraphDatabase
         try:
-            print(f"GET_NODES: search start, group_id={group_id}")
-            results = await graphiti.search(
-                query="*",
-                group_ids=[group_id],
-                num_results=100
-            )
-            print(f"GET_NODES: search returned {len(results)} results")
+            print(f"GET_NODES: start, group_id={group_id}")
+            uri = Config.NEO4J_URI
+            user = Config.NEO4J_USER
+            password = Config.NEO4J_PASSWORD
 
-            # 打印属性调试
-            if results:
-                first = results[0]
-                print(f"GET_NODES: first result type: {type(first).__name__}")
-                # 只打印公共属性（非方法）
-                attrs = {a: getattr(first, a, 'N/A') for a in dir(first) if not a.startswith('_') and not callable(getattr(first, a, None))}
-                print(f"GET_NODES: first result attrs: {attrs}")
+            driver = GraphDatabase.driver(uri, auth=(user, password))
+            with driver.session() as session:
+                # 查询实体 - 获取完整的节点属性
+                result = session.run(
+                    '''MATCH (n:Entity) WHERE n.group_id = $group_id OR n.group_id STARTS WITH "mirofish"
+                    RETURN n.name, id(n), labels(n), n.summary, n.entity_type, n.created_at, n.attributes, n.uuid''',
+                    group_id=group_id
+                )
 
-                # 尝试直接从搜索结果获取节点
-                # graphiti.search 返回的可能是一个特殊对象
-                print("GET_NODES: trying to extract nodes from search results...")
+                nodes = []
+                for record in result:
+                    name = record[0]
+                    node_id = record[1]
+                    labels = record[2] or []
+                    summary = record[3] or ""
+                    entity_type = record[4] or ""
+                    created_at = record[5]
+                    attributes = record[6] or {}
+                    uuid = record[7] or str(node_id)
 
-            nodes = []
-            seen_uuids = set()
-            for item in results:
-                # graphiti search 返回的结果有各种属性
-                # 尝试通过 __dict__ 查看
-                item_dict = vars(item) if hasattr(item, '__dict__') else {}
-                print(f"  Item: {item_dict}")
+                    # 解析 attributes
+                    if isinstance(attributes, str):
+                        import json
+                        try:
+                            attributes = json.loads(attributes)
+                        except:
+                            attributes = {}
 
-                # 尝试获取实体的name属性 - 通过不同方式
-                # source_node/target_node 可能是整个节点对象，不是UUID
-                source_node = getattr(item, 'source_node', None)
-                target_node = getattr(item, 'target_node', None)
+                    # 合并 labels 和 entity_type
+                    node_labels = labels.copy() if labels else []
+                    if entity_type and entity_type not in node_labels:
+                        node_labels.append(entity_type)
 
-                # 如果是节点对象，尝试获取name
-                if source_node:
-                    if hasattr(source_node, 'get'):
-                        source_name = source_node.get('name') or source_node.get('entity_name')
-                    else:
-                        source_name = getattr(source_node, 'name', None)
-                    source_uuid = getattr(source_node, 'uuid', None) or str(source_node)
-                else:
-                    source_name = None
-                    source_uuid = getattr(item, 'source_node_uuid', None)
-
-                if target_node:
-                    if hasattr(target_node, 'get'):
-                        target_name = target_node.get('name') or target_node.get('entity_name')
-                    else:
-                        target_name = getattr(target_node, 'name', None)
-                    target_uuid = getattr(target_node, 'uuid', None) or str(target_node)
-                else:
-                    target_name = None
-                    target_uuid = getattr(item, 'target_node_uuid', None)
-
-                # 备选：从 getattr 获取
-                if not source_name:
-                    source_name = (
-                        getattr(item, 'source_name', None) or
-                        getattr(item, 'source_entity_name', None) or
-                        getattr(item, 'source_node_name', None) or
-                        getattr(item, 'entity_name', None)
-                    )
-                if not target_name:
-                    target_name = (
-                        getattr(item, 'target_name', None) or
-                        getattr(item, 'target_entity_name', None) or
-                        getattr(item, 'target_node_name', None) or
-                        getattr(item, 'entity_name', None)
-                    )
-
-                print(f"  parsed: source_uuid={source_uuid}, source_name={source_name}, target_uuid={target_uuid}, target_name={target_name}")
-
-                if source_uuid and source_uuid not in seen_uuids:
-                    seen_uuids.add(source_uuid)
                     nodes.append({
-                        "uuid": source_uuid,
-                        "name": source_name or source_uuid,
-                        "properties": {}
-                    })
-                if target_uuid and target_uuid not in seen_uuids:
-                    seen_uuids.add(target_uuid)
-                    nodes.append({
-                        "uuid": target_uuid,
-                        "name": target_name or target_uuid,
-                        "properties": {}
+                        "uuid": uuid,
+                        "name": name,
+                        "labels": node_labels,
+                        "summary": summary,
+                        "entity_type": entity_type,
+                        "attributes": attributes,
+                        "created_at": str(created_at) if created_at else None,
                     })
 
+            driver.close()
             print(f"GET_NODES: returning {len(nodes)} nodes")
             return nodes
         except Exception as e:
             logger.error(f"get_nodes 错误: {e}")
+            import traceback
+            traceback.print_exc()
             return []
-        finally:
-            await graphiti.close()
     async def get_edges(
         self,
         group_id: str
@@ -748,38 +833,65 @@ class GraphitiService:
         Args:
             group_id: 分组ID
         Returns:
-            边列表
+            边列表（包含丰富的属性）
         """
-        graphiti = self._create_graphiti()
+        from neo4j import GraphDatabase
         try:
-            print(f"GET_EDGES: search start, group_id={group_id}")
-            results = await graphiti.search(
-                query="*",
-                group_ids=[group_id],
-                num_results=100
-            )
-            print(f"GET_EDGES: search returned {len(results)} results")
+            print(f"GET_EDGES: start, group_id={group_id}")
+            uri = Config.NEO4J_URI
+            user = Config.NEO4J_USER
+            password = Config.NEO4J_PASSWORD
 
-            edges = []
-            for edge in results:
-                source_uuid = getattr(edge, 'source_node_uuid', None)
-                target_uuid = getattr(edge, 'target_node_uuid', None)
-                edge_name = getattr(edge, 'name', None) or getattr(edge, 'relation_type', None) or "RELATED_TO"
+            driver = GraphDatabase.driver(uri, auth=(user, password))
+            with driver.session() as session:
+                # 查询关系 - 获取完整的边属性
+                result = session.run(
+                    '''MATCH (a:Entity)-[r]->(b:Entity)
+                    WHERE a.group_id = $group_id OR b.group_id = $group_id OR a.group_id STARTS WITH "mirofish" OR b.group_id STARTS WITH "mirofish"
+                    RETURN a.name, type(r), b.name, r.name, r.fact, r.summary, r.created_at, r.attributes, a.uuid, b.uuid''',
+                    group_id=group_id
+                )
 
-                print(f"  edge: source={source_uuid}, target={target_uuid}, name={edge_name}")
+                edges = []
+                for record in result:
+                    source_name = record[0]
+                    rel_type = record[1]
+                    target_name = record[2]
+                    rel_name = record[3] or ""
+                    fact = record[4] or ""
+                    summary = record[5] or ""
+                    created_at = record[6]
+                    attributes = record[7] or {}
+                    source_uuid = record[8] or source_name
+                    target_uuid = record[9] or target_name
 
-                if source_uuid and target_uuid:
+                    # 解析 attributes
+                    if isinstance(attributes, str):
+                        import json
+                        try:
+                            attributes = json.loads(attributes)
+                        except:
+                            attributes = {}
+
                     edges.append({
-                        "name": edge_name,
+                        "name": rel_name or rel_type,
+                        "fact": fact,
+                        "summary": summary,
                         "source": source_uuid,
                         "target": target_uuid,
-                        "properties": {}
+                        "source_node_uuid": source_uuid,
+                        "target_node_uuid": target_uuid,
+                        "fact_type": rel_type,
+                        "attributes": attributes,
+                        "created_at": str(created_at) if created_at else None,
+                        "properties": attributes,
                     })
 
+            driver.close()
             print(f"GET_EDGES: returning {len(edges)} edges")
             return edges
         except Exception as e:
             logger.error(f"get_edges 错误: {e}")
+            import traceback
+            traceback.print_exc()
             return []
-        finally:
-            await graphiti.close()
