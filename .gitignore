@@ -59,3 +59,10 @@ backend/uploads/
 # Docker 数据
 data/
 /backend/app/de-bug/
+
+# 临时目录
+.npm_cache/
+frontend/.npm_cache/
+backend/app/test_graphiti/
+backend/apptest/
+docs/tmp/
