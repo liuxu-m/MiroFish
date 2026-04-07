@@ -6,7 +6,7 @@
 import asyncio
 from typing import Dict, Any, List, Optional
 
-from .graphiti_service import GraphitiService
+from ..knowledge_graph import GraphitiService
 
 
 class GraphitiToolsService:

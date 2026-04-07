@@ -9,7 +9,7 @@ import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
-from .graphiti_service import GraphitiService
+from ..knowledge_graph import GraphitiService
 from ..config import Config
 from ..utils.logger import get_logger
 
